@@ -12,11 +12,13 @@ lives, and nothing between 1 kHz and 4 kHz, where vocal presence lives.
 
 ## What it does
 
-- **Equaliser** with six bands you can place anywhere from 20 Hz to 20 kHz
+- **Equaliser** with six bands you can place anywhere from 20 Hz to 20 kHz,
+  and a live response curve that redraws as you move them
 - **Dynamic bass engine** — a second processor with its own range, which the
   official app barely exposes
 - **Feature toggles** — Hi-Res (LHDC), spatial audio, game mode, wind noise
-  reduction and the rest, with unsupported ones greyed out rather than hidden
+  reduction and the rest. Switches your firmware does not report are shown
+  disabled rather than hidden, so you can see what it genuinely lacks
 - **Device info** — firmware version, per-bud battery, region code, and the
   capability bitmap showing what the firmware actually implements
 - Settings are written to the earbuds, so they persist across power cycles and
@@ -127,6 +129,35 @@ Action 1 adds, 2 modifies, 3 deletes. Writing a profile also makes it active.
   Buds Air8, the bits for the hearing-enhancement and ear-scan commands are
   set and the feature toggle flips, but no command in that subsystem ever
   responds — the switch exists, the engine behind it does not
+
+## How it is put together
+
+```
+buds/protocol.py    framing, command table, encode and decode
+buds/device.py      the connection and the high-level operations
+buds/controller.py  one worker thread that serialises every operation
+buds/curve.py       response maths for the equaliser display
+buds/presets.py     the tunings
+gui.py  cli.py      two front ends over the same library
+```
+
+The transport is a single request/response link with a shared receive buffer,
+so overlapping reads steal each other's replies — issue three at once and two
+come back empty. Everything therefore goes through `Controller`, which runs one
+job at a time on one thread and hands results back through a queue for the UI
+to collect. Nothing outside `controller.py` touches the serial port.
+
+## Tests
+
+```bash
+python tests/run_all.py            # everything
+python tests/run_all.py --offline  # only those not needing earbuds
+```
+
+The protocol fixtures are real responses captured from a Buds Air8, so the
+parsers are checked against hardware rather than against assumptions about it.
+The controller and interface tests drive the real window against real earbuds
+and skip themselves when none are connected.
 
 ## Compatibility
 

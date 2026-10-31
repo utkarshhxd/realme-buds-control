@@ -1,400 +1,618 @@
 #!/usr/bin/env python3
 """Desktop interface for realme Buds.
 
-Run with:  python gui.py
+    python gui.py
+
+Every device operation is queued on the controller's single worker thread, so
+nothing here touches the serial link directly and overlapping reads cannot
+steal each other's replies.
 """
 
 from __future__ import annotations
 
-import queue
-import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
-from buds import FEATURES, PRESETS, Buds, EqProfile, find_ports
+import customtkinter as ctk
+
+from buds import FEATURES, PRESETS, EqProfile
+from buds.controller import Controller, Result
+from buds.curve import F_MAX, F_MIN, curve_points, x_for
 from buds.presets import DEFAULT_EQ_SLOT
 from buds.protocol import EQ_GAIN_MAX, EQ_GAIN_MIN
 
-BASS_GAIN_MIN, BASS_GAIN_MAX = -5, 5
+BASS_MIN, BASS_MAX = -5, 5
 BASS_LABELS = ("Low", "Mid", "High")
+# 11 and 54 are here deliberately: on many models the firmware never reports
+# them, and showing them disabled says so plainly rather than hiding it.
+TOGGLES = [24, 27, 6, 26, 9, 29, 17, 4, 5, 8, 11, 54]
+POLL_MS = 60
 
-# Toggles worth exposing; the rest are diagnostic or read-only in practice.
-TOGGLE_IDS = [24, 27, 6, 26, 9, 29, 17, 4, 5, 8]
+BG = "#1c1c1e"
+CARD = "#2a2a2d"
+LINE = "#3a3a3e"
+ACCENT = "#4a9eda"
+MUTED = "#8b8b90"
+GOOD = "#3fb950"
+BAD = "#e05c5c"
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 
-class App(tk.Tk):
+class CurveView(ctk.CTkFrame):
+    """Draws the combined response of the six bands."""
+
+    def __init__(self, master, get_bands):
+        super().__init__(master, fg_color=CARD, corner_radius=10)
+        self._get_bands = get_bands
+        self.canvas = tk.Canvas(self, bg=CARD, highlightthickness=0, height=190)
+        self.canvas.pack(fill="both", expand=True, padx=2, pady=2)
+        self.canvas.bind("<Configure>", lambda _e: self.redraw())
+
+    def redraw(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        w = c.winfo_width() or 600
+        h = c.winfo_height() or 190
+        pad = 10
+
+        # horizontal guides, 0 dB emphasised
+        for frac, label in ((0.0, "+8"), (0.25, "+4"), (0.5, "0"),
+                            (0.75, "-4"), (1.0, "-8")):
+            y = 6 + frac * (h - 12)
+            c.create_line(pad, y, w - pad, y,
+                          fill=LINE if frac != 0.5 else "#4a4a50",
+                          dash=() if frac == 0.5 else (2, 4))
+            c.create_text(w - pad - 2, y - 7, text=label, anchor="ne",
+                          fill=MUTED, font=("Segoe UI", 9))
+
+        # decade markers
+        for freq, label in ((100, "100"), (1000, "1k"), (10000, "10k")):
+            x = x_for(freq, w, pad)
+            c.create_line(x, 6, x, h - 6, fill=LINE, dash=(2, 5))
+            c.create_text(x, h - 4, text=label, anchor="s",
+                          fill=MUTED, font=("Segoe UI", 9))
+
+        bands = self._get_bands()
+        pts = curve_points(bands, w, h - 12, gain_limit=8.0, pad=pad)
+        pts = [(x, y + 6) for x, y in pts]
+
+        flat = [coord for point in pts for coord in point]
+        if len(flat) >= 4:
+            fill = flat + [pts[-1][0], h / 2, pts[0][0], h / 2]
+            c.create_polygon(fill, fill="#4a9eda", outline="", stipple="gray25")
+            c.create_line(flat, fill=ACCENT, width=2, smooth=True)
+
+        for centre, gain in bands:
+            if centre <= 0:
+                continue
+            x = x_for(centre, w, pad)
+            y = (h - 12) / 2 - (gain / 8.0) * ((h - 12) / 2) + 6
+            y = max(7, min(h - 7, y))
+            c.create_oval(x - 4, y - 4, x + 4, y + 4,
+                          fill=ACCENT, outline=CARD, width=2)
+
+
+class BandRow(ctk.CTkFrame):
+    """One band: an editable centre frequency and a gain slider."""
+
+    def __init__(self, master, index: int, on_change):
+        super().__init__(master, fg_color="transparent")
+        self._on_change = on_change
+        self.index = index
+
+        self.freq_var = ctk.StringVar(value="1000")
+        self.gain = 0
+
+        self.entry = ctk.CTkEntry(self, textvariable=self.freq_var, width=72,
+                                  justify="right", border_color=LINE)
+        self.entry.grid(row=0, column=0, padx=(0, 4))
+        self.entry.bind("<KeyRelease>", lambda _e: self._changed())
+        ctk.CTkLabel(self, text="Hz", width=20, text_color=MUTED,
+                     font=("Segoe UI", 11)).grid(row=0, column=1, padx=(0, 10))
+
+        self.slider = ctk.CTkSlider(
+            self, from_=EQ_GAIN_MIN, to=EQ_GAIN_MAX,
+            number_of_steps=EQ_GAIN_MAX - EQ_GAIN_MIN,
+            command=self._slider_moved, progress_color=ACCENT,
+            button_color=ACCENT, button_hover_color="#6ab0ea")
+        self.slider.set(0)
+        self.slider.grid(row=0, column=2, sticky="ew")
+
+        self.value = ctk.CTkLabel(self, text="0 dB", width=48,
+                                  font=("Segoe UI", 11))
+        self.value.grid(row=0, column=3, padx=(8, 0))
+        self.columnconfigure(2, weight=1)
+
+    def _slider_moved(self, raw) -> None:
+        self.gain = int(round(float(raw)))
+        self.value.configure(text=f"{self.gain:+d} dB")
+        self._changed()
+
+    def _changed(self) -> None:
+        self._on_change()
+
+    def set_band(self, freq: int, gain: int) -> None:
+        self.freq_var.set(str(freq))
+        self.gain = gain
+        self.slider.set(gain)
+        self.value.configure(text=f"{gain:+d} dB")
+
+    def band(self) -> tuple[int, int] | None:
+        try:
+            freq = int(float(self.freq_var.get()))
+        except ValueError:
+            return None
+        if not F_MIN <= freq <= F_MAX:
+            return None
+        return freq, self.gain
+
+    def set_enabled(self, on: bool) -> None:
+        state = "normal" if on else "disabled"
+        self.entry.configure(state=state)
+        self.slider.configure(state=state)
+
+
+class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("realme Buds Control")
-        self.geometry("620x560")
-        self.minsize(560, 520)
+        self.geometry("760x720")
+        self.minsize(700, 660)
+        self.configure(fg_color=BG)
 
-        self.buds: Buds | None = None
-        self._results: queue.Queue = queue.Queue()
-        self._ports: list[tuple[str, str]] = []
+        self.controller = Controller()
+        self.ports: list = []
+        self._feature_vars: dict[int, ctk.BooleanVar] = {}
+        self._feature_boxes: dict[int, ctk.CTkSwitch] = {}
+        self._suspend_feature_events = False
 
-        self._build_connection_bar()
-        self._build_tabs()
-        self._build_status_bar()
+        self._build_header()
+        self._build_body()
+        self._build_status()
 
         self.refresh_ports()
-        self.after(100, self._poll_results)
+        self._set_connected(False)
+        self._pump_id = self.after(POLL_MS, self._pump)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------- layout --
-    def _build_connection_bar(self) -> None:
-        bar = ttk.Frame(self, padding=(10, 10, 10, 4))
-        bar.pack(fill="x")
+    def _build_header(self) -> None:
+        bar = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        bar.pack(fill="x", padx=14, pady=(14, 8))
 
-        ttk.Label(bar, text="Port").pack(side="left")
-        self.port_var = tk.StringVar()
-        self.port_box = ttk.Combobox(bar, textvariable=self.port_var,
-                                     width=34, state="readonly")
-        self.port_box.pack(side="left", padx=6)
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.pack(side="left", padx=14, pady=12)
 
-        ttk.Button(bar, text="Refresh", command=self.refresh_ports).pack(side="left")
-        self.connect_btn = ttk.Button(bar, text="Connect", command=self.toggle_connection)
-        self.connect_btn.pack(side="left", padx=6)
+        self.port_menu = ctk.CTkOptionMenu(left, values=["No devices"], width=230,
+                                           fg_color="#333338", button_color="#3f3f45",
+                                           button_hover_color="#4a4a52")
+        self.port_menu.pack(side="left")
+        ctk.CTkButton(left, text="Refresh", width=76, command=self.refresh_ports,
+                      fg_color="#3a3a40", hover_color="#45454c").pack(side="left", padx=8)
+        self.connect_btn = ctk.CTkButton(left, text="Connect", width=100,
+                                         command=self.toggle_connection,
+                                         fg_color=ACCENT, hover_color="#6ab0ea")
+        self.connect_btn.pack(side="left")
 
-    def _build_tabs(self) -> None:
-        self.tabs = ttk.Notebook(self, padding=(8, 4))
-        self.tabs.pack(fill="both", expand=True)
-        self._build_eq_tab()
-        self._build_bass_tab()
-        self._build_features_tab()
-        self._build_device_tab()
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.pack(side="right", padx=14)
+        self.dot = ctk.CTkLabel(right, text="●", text_color=BAD,
+                                font=("Segoe UI", 16))
+        self.dot.pack(side="left", padx=(0, 6))
+        self.device_label = ctk.CTkLabel(right, text="Not connected",
+                                         font=("Segoe UI", 13, "bold"))
+        self.device_label.pack(side="left")
+        self.battery_label = ctk.CTkLabel(right, text="", text_color=MUTED,
+                                          font=("Segoe UI", 11))
+        self.battery_label.pack(side="left", padx=(10, 0))
 
-    def _build_eq_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=10)
-        self.tabs.add(tab, text="Equaliser")
+    def _build_body(self) -> None:
+        self.tabs = ctk.CTkTabview(self, fg_color=CARD, corner_radius=10,
+                                   segmented_button_selected_color=ACCENT,
+                                   segmented_button_selected_hover_color="#6ab0ea")
+        self.tabs.pack(fill="both", expand=True, padx=14, pady=4)
+        for name in ("Equaliser", "Bass", "Features", "Device"):
+            self.tabs.add(name)
+        self._build_eq_tab(self.tabs.tab("Equaliser"))
+        self._build_bass_tab(self.tabs.tab("Bass"))
+        self._build_features_tab(self.tabs.tab("Features"))
+        self._build_device_tab(self.tabs.tab("Device"))
 
-        top = ttk.Frame(tab)
-        top.pack(fill="x", pady=(0, 10))
-        ttk.Label(top, text="Preset").pack(side="left")
-        self.preset_var = tk.StringVar(value="classic")
-        preset_box = ttk.Combobox(top, textvariable=self.preset_var, width=14,
-                                  state="readonly",
-                                  values=[p.name for p in PRESETS.values()])
-        preset_box.pack(side="left", padx=6)
-        preset_box.bind("<<ComboboxSelected>>", lambda _e: self.load_preset())
-        ttk.Button(top, text="Load", command=self.load_preset).pack(side="left")
+    def _build_eq_tab(self, tab) -> None:
+        self.curve = CurveView(tab, self.current_bands)
+        self.curve.pack(fill="x", pady=(6, 10))
 
-        self.preset_note = ttk.Label(tab, text="", wraplength=560,
-                                     foreground="#555", justify="left")
-        self.preset_note.pack(fill="x", pady=(0, 10))
+        presets = ctk.CTkFrame(tab, fg_color="transparent")
+        presets.pack(fill="x", pady=(0, 10))
+        self.preset_buttons: dict[str, ctk.CTkButton] = {}
+        for key, preset in PRESETS.items():
+            btn = ctk.CTkButton(presets, text=preset.name, width=92, height=30,
+                                fg_color="#34343a", hover_color="#41414a",
+                                command=lambda k=key: self.load_preset(k))
+            btn.pack(side="left", padx=(0, 6))
+            self.preset_buttons[key] = btn
 
-        grid = ttk.LabelFrame(tab, text="Bands", padding=10)
-        grid.pack(fill="both", expand=True)
-        ttk.Label(grid, text="Centre (Hz)").grid(row=0, column=0, sticky="w")
-        ttk.Label(grid, text="Gain (dB)").grid(row=0, column=1, sticky="w", padx=10)
+        self.preset_note = ctk.CTkLabel(tab, text="", text_color=MUTED,
+                                        wraplength=640, justify="left",
+                                        font=("Segoe UI", 11))
+        self.preset_note.pack(fill="x", pady=(0, 8))
 
-        self.freq_vars: list[tk.StringVar] = []
-        self.gain_vars: list[tk.IntVar] = []
+        self.rows: list[BandRow] = []
+        holder = ctk.CTkFrame(tab, fg_color="transparent")
+        holder.pack(fill="x")
         for i in range(6):
-            freq = tk.StringVar(value="0")
-            gain = tk.IntVar(value=0)
-            self.freq_vars.append(freq)
-            self.gain_vars.append(gain)
-            ttk.Entry(grid, textvariable=freq, width=9).grid(
-                row=i + 1, column=0, pady=3, sticky="w")
-            scale = tk.Scale(grid, from_=EQ_GAIN_MIN, to=EQ_GAIN_MAX,
-                             orient="horizontal", variable=gain, length=330,
-                             resolution=1, showvalue=True)
-            scale.grid(row=i + 1, column=1, padx=10, sticky="we")
-        grid.columnconfigure(1, weight=1)
+            row = BandRow(holder, i, self._bands_changed)
+            row.pack(fill="x", pady=3)
+            self.rows.append(row)
 
-        actions = ttk.Frame(tab)
-        actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Apply to earbuds",
-                   command=self.apply_eq).pack(side="left")
-        ttk.Button(actions, text="Read from earbuds",
-                   command=self.read_eq).pack(side="left", padx=6)
-        self.load_preset()
+        actions = ctk.CTkFrame(tab, fg_color="transparent")
+        actions.pack(fill="x", pady=(14, 4))
+        self.apply_btn = ctk.CTkButton(actions, text="Apply to earbuds", width=150,
+                                       command=self.apply_eq, fg_color=ACCENT,
+                                       hover_color="#6ab0ea")
+        self.apply_btn.pack(side="left")
+        self.read_eq_btn = ctk.CTkButton(actions, text="Read from earbuds", width=150,
+                                         command=self.read_eq, fg_color="#3a3a40",
+                                         hover_color="#45454c")
+        self.read_eq_btn.pack(side="left", padx=8)
+        self.load_preset("classic", apply_bass=False)
 
-    def _build_bass_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=10)
-        self.tabs.add(tab, text="Bass engine")
+    def _build_bass_tab(self, tab) -> None:
+        ctk.CTkLabel(tab, justify="left", wraplength=640, text_color=MUTED,
+                     font=("Segoe UI", 11),
+                     text="A separate processor from the equaliser with its own "
+                          "range. Using it for low-end weight leaves the "
+                          "equaliser free for tonal work."
+                     ).pack(fill="x", pady=(10, 14))
 
-        ttk.Label(tab, wraplength=560, justify="left", foreground="#555",
-                  text="A separate processor from the equaliser, with its own "
-                       "range. Using it for low-end weight leaves the equaliser "
-                       "free to do tonal work.").pack(fill="x", pady=(0, 12))
+        self.bass_switch = ctk.CTkSwitch(tab, text="Dynamic bass engine",
+                                         progress_color=ACCENT)
+        self.bass_switch.select()
+        self.bass_switch.pack(anchor="w", pady=(0, 16))
 
-        self.bass_enabled = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tab, text="Enable dynamic bass engine",
-                        variable=self.bass_enabled).pack(anchor="w", pady=(0, 8))
+        self.bass_sliders: list[ctk.CTkSlider] = []
+        self.bass_values: list[ctk.CTkLabel] = []
+        for label in BASS_LABELS:
+            row = ctk.CTkFrame(tab, fg_color="transparent")
+            row.pack(fill="x", pady=5)
+            ctk.CTkLabel(row, text=label, width=54, anchor="w").pack(side="left")
+            value = ctk.CTkLabel(row, text="0", width=34)
+            slider = ctk.CTkSlider(row, from_=BASS_MIN, to=BASS_MAX,
+                                   number_of_steps=BASS_MAX - BASS_MIN,
+                                   progress_color=ACCENT, button_color=ACCENT,
+                                   command=lambda v, lb=value: lb.configure(
+                                       text=f"{int(round(float(v))):+d}"))
+            slider.set(0)
+            slider.pack(side="left", fill="x", expand=True, padx=10)
+            value.pack(side="left")
+            self.bass_sliders.append(slider)
+            self.bass_values.append(value)
 
-        self.bass_vars: list[tk.IntVar] = []
-        box = ttk.Frame(tab)
-        box.pack(fill="x")
-        for i, label in enumerate(BASS_LABELS):
-            var = tk.IntVar(value=0)
-            self.bass_vars.append(var)
-            ttk.Label(box, text=label, width=6).grid(row=i, column=0, sticky="w")
-            tk.Scale(box, from_=BASS_GAIN_MIN, to=BASS_GAIN_MAX,
-                     orient="horizontal", variable=var, length=380,
-                     resolution=1).grid(row=i, column=1, sticky="we", pady=2)
-        box.columnconfigure(1, weight=1)
+        actions = ctk.CTkFrame(tab, fg_color="transparent")
+        actions.pack(fill="x", pady=18)
+        self.bass_apply = ctk.CTkButton(actions, text="Apply", width=120,
+                                        command=self.apply_bass, fg_color=ACCENT,
+                                        hover_color="#6ab0ea")
+        self.bass_apply.pack(side="left")
+        self.bass_read = ctk.CTkButton(actions, text="Read", width=120,
+                                       command=self.read_bass, fg_color="#3a3a40",
+                                       hover_color="#45454c")
+        self.bass_read.pack(side="left", padx=8)
 
-        actions = ttk.Frame(tab)
-        actions.pack(fill="x", pady=12)
-        ttk.Button(actions, text="Apply", command=self.apply_bass).pack(side="left")
-        ttk.Button(actions, text="Read", command=self.read_bass).pack(side="left", padx=6)
+    def _build_features_tab(self, tab) -> None:
+        ctk.CTkLabel(tab, justify="left", wraplength=640, text_color=MUTED,
+                     font=("Segoe UI", 11),
+                     text="Switches your firmware did not report are disabled, "
+                          "which means it does not implement them."
+                     ).pack(fill="x", pady=(10, 14))
 
-    def _build_features_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=10)
-        self.tabs.add(tab, text="Features")
-        ttk.Label(tab, wraplength=560, justify="left", foreground="#555",
-                  text="Greyed-out entries are toggles this firmware did not "
-                       "answer for, which means it does not implement them."
-                  ).pack(fill="x", pady=(0, 10))
+        grid = ctk.CTkFrame(tab, fg_color="transparent")
+        grid.pack(fill="both", expand=True)
+        for i, fid in enumerate(TOGGLES):
+            var = ctk.BooleanVar(value=False)
+            switch = ctk.CTkSwitch(grid, text=FEATURES.get(fid, f"Feature {fid}"),
+                                   variable=var, progress_color=ACCENT,
+                                   command=lambda f=fid: self.toggle_feature(f))
+            switch.grid(row=i % 5, column=i // 5, sticky="w", padx=(0, 40), pady=9)
+            switch.configure(state="disabled")
+            self._feature_vars[fid] = var
+            self._feature_boxes[fid] = switch
 
-        self.feature_vars: dict[int, tk.BooleanVar] = {}
-        self.feature_boxes: dict[int, ttk.Checkbutton] = {}
-        holder = ttk.Frame(tab)
-        holder.pack(fill="both", expand=True)
-        for row, fid in enumerate(TOGGLE_IDS):
-            var = tk.BooleanVar(value=False)
-            self.feature_vars[fid] = var
-            box = ttk.Checkbutton(holder, text=FEATURES.get(fid, f"Feature {fid}"),
-                                  variable=var, state="disabled",
-                                  command=lambda f=fid: self.toggle_feature(f))
-            box.grid(row=row % 5, column=row // 5, sticky="w", padx=(0, 24), pady=4)
-            self.feature_boxes[fid] = box
+        self.features_read = ctk.CTkButton(tab, text="Read from earbuds", width=150,
+                                           command=self.read_features,
+                                           fg_color="#3a3a40", hover_color="#45454c")
+        self.features_read.pack(anchor="w", pady=14)
 
-        ttk.Button(tab, text="Read from earbuds",
-                   command=self.read_features).pack(anchor="w", pady=10)
+    def _build_device_tab(self, tab) -> None:
+        self.info_box = ctk.CTkTextbox(tab, fg_color="#232326", wrap="word",
+                                       font=("Consolas", 12))
+        self.info_box.pack(fill="both", expand=True, pady=10)
+        self.info_box.configure(state="disabled")
+        self.info_read = ctk.CTkButton(tab, text="Read device info", width=150,
+                                       command=self.read_info, fg_color="#3a3a40",
+                                       hover_color="#45454c")
+        self.info_read.pack(anchor="w", pady=(0, 10))
 
-    def _build_device_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=10)
-        self.tabs.add(tab, text="Device")
-        self.info_text = tk.Text(tab, height=16, wrap="word", relief="flat",
-                                 background=self.cget("background"))
-        self.info_text.pack(fill="both", expand=True)
-        self.info_text.configure(state="disabled")
-        ttk.Button(tab, text="Read device info",
-                   command=self.read_info).pack(anchor="w", pady=(8, 0))
+    def _build_status(self) -> None:
+        self.status = ctk.CTkLabel(self, text="Not connected", anchor="w",
+                                   text_color=MUTED, font=("Segoe UI", 11))
+        self.status.pack(fill="x", padx=18, pady=(2, 12))
 
-    def _build_status_bar(self) -> None:
-        self.status = tk.StringVar(value="Not connected")
-        ttk.Separator(self).pack(fill="x")
-        ttk.Label(self, textvariable=self.status, anchor="w",
-                  padding=(10, 4)).pack(fill="x")
+    # -------------------------------------------------------------- state --
+    def _set_connected(self, on: bool, name: str = "") -> None:
+        self.connect_btn.configure(text="Disconnect" if on else "Connect")
+        self.dot.configure(text_color=GOOD if on else BAD)
+        self.device_label.configure(text=name or ("Connected" if on else "Not connected"))
+        if not on:
+            self.battery_label.configure(text="")
+        for widget in (self.apply_btn, self.read_eq_btn, self.bass_apply,
+                       self.bass_read, self.features_read, self.info_read):
+            widget.configure(state="normal" if on else "disabled")
+        for row in self.rows:
+            row.set_enabled(on)
+        if not on:
+            self._suspend_feature_events = True
+            for fid, switch in self._feature_boxes.items():
+                switch.configure(state="disabled")
+                self._feature_vars[fid].set(False)
+            self._suspend_feature_events = False
 
-    # ------------------------------------------------------ worker plumbing --
-    def _run(self, fn, done=None, busy: str = "Working...") -> None:
-        """Run a serial operation off the UI thread."""
-        if not (self.buds and self.buds.connected):
-            self.status.set("Not connected")
-            return
-        self.status.set(busy)
+    def _say(self, text: str, error: bool = False) -> None:
+        self.status.configure(text=text, text_color=BAD if error else MUTED)
 
-        def worker():
-            try:
-                self._results.put((done, fn(), None))
-            except Exception as exc:  # surfaced in the status bar
-                self._results.put((done, None, exc))
+    # ---------------------------------------------------------- event loop --
+    def _pump(self) -> None:
+        for result in self.controller.poll():
+            if result.disconnected:
+                self._set_connected(False)
+                self._say(result.message or "Earbuds disconnected", error=True)
+        self._pump_id = self.after(POLL_MS, self._pump)
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _handle(self, label: str, on_ok):
+        """Build a result callback that reports failures consistently."""
 
-    def _poll_results(self) -> None:
-        try:
-            while True:
-                callback, result, error = self._results.get_nowait()
-                if error:
-                    self.status.set(f"Error: {error}")
-                    self._set_disconnected()
-                elif callback:
-                    callback(result)
-        except queue.Empty:
-            pass
-        self.after(120, self._poll_results)
+        def done(result: Result) -> None:
+            if not result.ok:
+                self._say(f"{label} failed: {result.message}", error=True)
+                return
+            on_ok(result.value)
+
+        return done
 
     # ------------------------------------------------------------- actions --
     def refresh_ports(self) -> None:
-        self._ports = find_ports()
-        labels = [port.label for port in self._ports]
-        self.port_box["values"] = labels
-        candidates = [port for port in self._ports if port.is_candidate]
-        if candidates:
-            # find_ports puts recognised earbuds first
-            self.port_var.set(candidates[0].label)
-        elif labels and not self.port_var.get():
-            self.port_var.set(labels[0])
-        if not labels:
-            self.status.set("No serial ports. Connect the earbuds to this computer.")
-        else:
-            self.status.set(f"{len(candidates)} paired device(s) available")
+        self.ports = self.controller.ports()
+        candidates = [p for p in self.ports if p.is_candidate]
+        shown = candidates or self.ports
+        if not shown:
+            self.port_menu.configure(values=["No devices"])
+            self.port_menu.set("No devices")
+            self._say("No serial ports. Connect the earbuds to this computer.")
+            return
+        labels = [p.label for p in shown]
+        self.port_menu.configure(values=labels)
+        self.port_menu.set(labels[0])
+        self._say(f"{len(candidates)} paired device(s) found")
 
-    def _selected_port(self) -> str | None:
-        label = self.port_var.get()
-        for port in self._ports:
-            if port.label == label:
-                return port.device
-        return None
+    def _selected_port(self):
+        label = self.port_menu.get()
+        return next((p for p in self.ports if p.label == label), None)
 
     def toggle_connection(self) -> None:
-        if self.buds and self.buds.connected:
-            self.buds.close()
-            self._set_disconnected()
+        if self.controller.connected:
+            self.controller.disconnect(
+                self._handle("Disconnect", lambda _v: (
+                    self._set_connected(False), self._say("Disconnected"))))
             return
+
         port = self._selected_port()
         if not port:
-            messagebox.showwarning("No port", "Pick a serial port first.")
+            messagebox.showwarning("No device", "Choose a device first.")
             return
-        try:
-            self.buds = Buds(port)
-            self.buds.connect()
-        except Exception as exc:
-            messagebox.showerror("Connection failed", str(exc))
-            self._set_disconnected()
-            return
-        self.connect_btn.configure(text="Disconnect")
-        self.status.set(f"Connected on {port}")
-        self.read_info()
-        self.read_features()
-        self.read_bass()
+        self._say(f"Connecting on {port.device}...")
+        self.connect_btn.configure(state="disabled")
 
-    def _set_disconnected(self) -> None:
-        self.buds = None
-        self.connect_btn.configure(text="Connect")
-        for box in self.feature_boxes.values():
-            box.configure(state="disabled")
-        self.status.set("Not connected")
+        def connected(result: Result) -> None:
+            self.connect_btn.configure(state="normal")
+            if not result.ok:
+                self._set_connected(False)
+                self._say(result.message, error=True)
+                messagebox.showerror("Connection failed", result.message)
+                return
+            self._set_connected(True, port.name or port.device)
+            self._say(f"Connected on {port.device}, firmware {result.value}")
+            # queued, so these run one after another rather than colliding
+            self.read_info()
+            self.read_features()
+            self.read_bass()
+            self.read_eq()
 
-    def load_preset(self) -> None:
-        name = self.preset_var.get()
-        preset = next((p for p in PRESETS.values() if p.name == name), None)
-        if not preset:
-            return
-        for i, (hz, gain) in enumerate(preset.bands):
-            self.freq_vars[i].set(str(hz))
-            self.gain_vars[i].set(gain)
-        for i, value in enumerate(preset.bass):
-            self.bass_vars[i].set(value)
-        self.preset_note.configure(text=preset.description)
+        self.controller.connect(port, connected)
 
-    def _collect_bands(self) -> list[tuple[int, int]] | None:
+    def current_bands(self) -> list[tuple[int, int]]:
         bands = []
-        for freq_var, gain_var in zip(self.freq_vars, self.gain_vars):
-            try:
-                hz = int(freq_var.get())
-            except ValueError:
-                messagebox.showerror("Bad frequency",
-                                     f"'{freq_var.get()}' is not a number.")
-                return None
-            if not 20 <= hz <= 20000:
-                messagebox.showerror("Bad frequency",
-                                     f"{hz} Hz is outside 20-20000.")
-                return None
-            bands.append((hz, gain_var.get()))
+        for row in self.rows:
+            band = row.band()
+            if band:
+                bands.append(band)
         return bands
 
-    def apply_eq(self) -> None:
-        bands = self._collect_bands()
-        if bands is None:
+    def _bands_changed(self) -> None:
+        self.curve.redraw()
+
+    def load_preset(self, key: str, apply_bass: bool = True) -> None:
+        preset = PRESETS.get(key)
+        if not preset:
             return
-        name = self.preset_var.get() or "Custom"
+        for row, (freq, gain) in zip(self.rows, preset.bands):
+            row.set_band(freq, gain)
+        if apply_bass:
+            for slider, label, value in zip(self.bass_sliders, self.bass_values,
+                                            preset.bass):
+                slider.set(value)
+                label.configure(text=f"{value:+d}")
+        self.preset_note.configure(text=preset.description)
+        for k, btn in self.preset_buttons.items():
+            btn.configure(fg_color=ACCENT if k == key else "#34343a")
+        self.curve.redraw()
+
+    def apply_eq(self) -> None:
+        bands = []
+        for i, row in enumerate(self.rows, start=1):
+            band = row.band()
+            if band is None:
+                messagebox.showerror(
+                    "Invalid frequency",
+                    f"Band {i}: enter a whole number between "
+                    f"{int(F_MIN)} and {int(F_MAX)} Hz.")
+                return
+            bands.append(band)
+
+        name = next((p.name for k, p in PRESETS.items()
+                     if list(p.bands) == bands), "Custom")
         profile = EqProfile(eq_id=DEFAULT_EQ_SLOT, name=name[:12], bands=bands)
-
-        def done(ok):
-            self.status.set(f"EQ '{profile.name}' applied"
-                            if ok else "Earbuds rejected the EQ")
-
-        self._run(lambda: self.buds.write_eq(profile), done, "Writing EQ...")
+        self._say(f"Writing '{profile.name}'...")
+        self.controller.submit(
+            "write_eq", lambda b: b.write_eq(profile),
+            self._handle("Apply", lambda ok: self._say(
+                f"Applied '{profile.name}'" if ok
+                else "The earbuds rejected that curve")))
 
     def read_eq(self) -> None:
-        def done(profiles):
+        def loaded(profiles) -> None:
             active = next((p for p in profiles if p.active), None)
             if not active:
-                self.status.set("No active custom EQ on the earbuds")
+                self._say("No custom EQ is active on the earbuds")
                 return
-            for i, (hz, gain) in enumerate(active.bands[:6]):
-                self.freq_vars[i].set(str(hz))
-                self.gain_vars[i].set(gain)
-            self.status.set(f"Loaded '{active.name}' from the earbuds")
+            for row, (freq, gain) in zip(self.rows, active.bands):
+                row.set_band(freq, gain)
+            self.curve.redraw()
+            self._say(f"Loaded '{active.name}' from the earbuds")
 
-        self._run(self.buds.eq_profiles, done, "Reading EQ...")
+        self.controller.submit("read_eq", lambda b: b.eq_profiles(),
+                               self._handle("Read EQ", loaded))
 
     def apply_bass(self) -> None:
-        values = [v.get() for v in self.bass_vars]
-        enabled = self.bass_enabled.get()
-
-        def done(ok):
-            self.status.set("Bass engine updated" if ok
-                            else "Earbuds rejected the bass settings")
-
-        self._run(lambda: self.buds.set_bass_engine(values, enabled), done,
-                  "Writing bass settings...")
+        values = [int(round(s.get())) for s in self.bass_sliders]
+        enabled = bool(self.bass_switch.get())
+        self._say("Writing bass settings...")
+        self.controller.submit(
+            "write_bass", lambda b: b.set_bass_engine(values, enabled),
+            self._handle("Apply bass", lambda ok: self._say(
+                "Bass engine updated" if ok
+                else "The earbuds rejected those bass settings")))
 
     def read_bass(self) -> None:
-        def done(bands):
-            for band, value, _lo, _hi in bands:
-                if 1 <= band <= len(self.bass_vars):
-                    self.bass_vars[band - 1].set(value)
+        def loaded(bands) -> None:
+            for band, value, *_ in bands:
+                if 1 <= band <= len(self.bass_sliders):
+                    self.bass_sliders[band - 1].set(value)
+                    self.bass_values[band - 1].configure(text=f"{value:+d}")
             if bands:
-                self.status.set("Bass engine read")
+                self._say("Bass engine read")
 
-        self._run(self.buds.bass_engine, done, "Reading bass engine...")
+        self.controller.submit("read_bass", lambda b: b.bass_engine(),
+                               self._handle("Read bass", loaded))
 
     def read_features(self) -> None:
-        def done(features):
-            for fid, box in self.feature_boxes.items():
+        def loaded(features) -> None:
+            self._suspend_feature_events = True
+            for fid, switch in self._feature_boxes.items():
                 if fid in features:
-                    self.feature_vars[fid].set(bool(features[fid]))
-                    box.configure(state="normal")
+                    switch.configure(state="normal")
+                    self._feature_vars[fid].set(bool(features[fid]))
                 else:
-                    box.configure(state="disabled")
-            self.status.set(f"{len(features)} features reported")
+                    switch.configure(state="disabled")
+                    self._feature_vars[fid].set(False)
+            self._suspend_feature_events = False
+            supported = sum(1 for f in TOGGLES if f in features)
+            self._say(f"{supported} of {len(TOGGLES)} switches supported "
+                      "by this firmware")
 
-        self._run(self.buds.features, done, "Reading features...")
+        self.controller.submit("read_features", lambda b: b.features(),
+                               self._handle("Read features", loaded))
 
     def toggle_feature(self, feature_id: int) -> None:
-        wanted = self.feature_vars[feature_id].get()
+        if self._suspend_feature_events:
+            return
+        wanted = bool(self._feature_vars[feature_id].get())
         label = FEATURES.get(feature_id, str(feature_id))
 
-        def done(ok):
-            if ok:
-                self.status.set(f"{label}: {'on' if wanted else 'off'}")
-            else:
-                self.feature_vars[feature_id].set(not wanted)
-                self.status.set(f"Earbuds refused to change {label}")
+        def done(result: Result) -> None:
+            if result.ok and result.value:
+                self._say(f"{label}: {'on' if wanted else 'off'}")
+                return
+            # put the switch back where it was
+            self._suspend_feature_events = True
+            self._feature_vars[feature_id].set(not wanted)
+            self._suspend_feature_events = False
+            self._say(f"The earbuds refused to change {label}", error=True)
 
-        self._run(lambda: self.buds.set_feature(feature_id, wanted), done,
-                  f"Setting {label}...")
+        self.controller.submit("set_feature",
+                               lambda b: b.set_feature(feature_id, wanted), done)
 
     def read_info(self) -> None:
-        def done(info):
+        def loaded(info) -> None:
+            names = {1: "Left", 2: "Right", 3: "Case"}
+            if info.battery:
+                parts = [f"{names.get(k, k)} {v}%"
+                         for k, v in sorted(info.battery.items()) if k != 3]
+                self.battery_label.configure(text="  ".join(parts))
+
             lines = [
-                f"Firmware        {info.firmware or 'unknown'}",
-                f"Region code     {info.region if info.region is not None else 'unknown'}",
+                f"Firmware       {info.firmware or 'unknown'}",
+                f"Region code    {info.region if info.region is not None else 'unknown'}",
             ]
             if info.battery:
-                names = {1: "Left", 2: "Right", 3: "Case"}
                 for key, pct in sorted(info.battery.items()):
-                    lines.append(f"{names.get(key, key):<15} {pct}%")
+                    lines.append(f"{names.get(key, key):<14} {pct}%")
             if info.active_preset is not None:
-                lines.append(f"Active preset   {info.active_preset}")
+                lines.append(f"Active preset  {info.active_preset}")
             if info.capabilities:
                 lines.append(f"\n{len(info.capabilities)} commands supported "
-                             "by this firmware.")
+                             f"by this firmware.")
             if info.features:
-                lines.append("\nFeatures reported:")
+                lines.append("\nSwitch features reported:")
                 for fid, state in sorted(info.features.items()):
                     lines.append(f"  [{fid:>2}] {FEATURES.get(fid, 'unknown'):<24}"
                                  f" {'on' if state else 'off'}")
-            self.info_text.configure(state="normal")
-            self.info_text.delete("1.0", "end")
-            self.info_text.insert("1.0", "\n".join(lines))
-            self.info_text.configure(state="disabled")
-            self.status.set("Device info read")
+                missing = [f for f in (11, 19, 54) if f not in info.features]
+                if missing:
+                    lines.append("\nNot implemented by this firmware:")
+                    for fid in missing:
+                        lines.append(f"  [{fid:>2}] {FEATURES.get(fid, 'unknown')}")
 
-        self._run(self.buds.info, done, "Reading device...")
+            self.info_box.configure(state="normal")
+            self.info_box.delete("1.0", "end")
+            self.info_box.insert("1.0", "\n".join(lines))
+            self.info_box.configure(state="disabled")
+            self._say("Device information updated")
+
+        self.controller.submit("read_info", lambda b: b.info(),
+                               self._handle("Read device", loaded))
 
     def _on_close(self) -> None:
-        if self.buds:
-            self.buds.close()
+        # Cancel the polling loop first, or Tk keeps firing it into a window
+        # that no longer exists.
+        if getattr(self, "_pump_id", None):
+            try:
+                self.after_cancel(self._pump_id)
+            except Exception:
+                pass
+            self._pump_id = None
+        self.controller.stop()
         self.destroy()
+
+    def destroy(self) -> None:
+        if getattr(self, "_pump_id", None):
+            try:
+                self.after_cancel(self._pump_id)
+            except Exception:
+                pass
+            self._pump_id = None
+        super().destroy()
 
 
 def main() -> None:
