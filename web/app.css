@@ -41,11 +41,7 @@ h2 { font-size: 16px; }
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; }
-.logo {
-  width: 22px; height: 22px; border-radius: 7px;
-  background: linear-gradient(145deg, var(--accent), #2d6fa8);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.25);
-}
+.logo { width: 26px; height: 26px; display: block; }
 .device { display: flex; align-items: center; gap: 12px; }
 .device-text { display: flex; flex-direction: column; line-height: 1.25; }
 .device-text strong { font-size: 13px; font-weight: 600; }

@@ -1,3 +1,5 @@
+<img src="web/logo.svg" width="72" alt="">
+
 # realme Buds Control
 
 Control realme Buds earbuds directly over Bluetooth, without the official app.

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="realme Buds Control">
+  <defs>
+    <linearGradient id="face" x1="6" y1="0" x2="58" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7cc6f7"/>
+      <stop offset=".55" stop-color="#4b9ddd"/>
+      <stop offset="1" stop-color="#26659f"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="17" fill="url(#face)"/>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="16.25"
+        fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="1.5"/>
+
+  <!-- a response curve over the zero line with a band handle on its peak:
+       what the app draws.  Kept asymmetric; a symmetric bell reads as an A. -->
+  <path d="M9 39H55" stroke="#0a111b" stroke-opacity=".3" stroke-width="3"
+        stroke-linecap="round"/>
+  <path d="M9 39C16 39 15 48 23 48C30 48 33 20 40 20C48 20 49 30 55 30"
+        fill="none" stroke="#0a111b" stroke-opacity=".9" stroke-width="5"
+        stroke-linecap="round"/>
+  <circle cx="40" cy="20" r="7" fill="#0a111b" fill-opacity=".9"/>
+  <circle cx="40" cy="20" r="3.1" fill="#9ad6ff"/>
+</svg>
