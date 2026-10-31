@@ -112,11 +112,18 @@ main {
   padding: 6px;
   margin-bottom: 16px;
 }
-#curve { display: block; width: 100%; height: 232px; touch-action: none; }
+#curve { display: block; width: 100%; height: 248px; touch-action: none; }
 #grid line { stroke: var(--line); }
 #grid line.zero { stroke: #39405280; stroke-width: 1.5; }
 #grid text { fill: #697288; font-size: 11px; }
 #curve-line { filter: drop-shadow(0 2px 8px rgba(90,169,230,.35)); }
+
+/* each band on its own, so a dot visibly belongs to one of these rather than
+   to the summed line above it */
+#bells path { fill: none; stroke: #6f87a8; stroke-width: 1.2; opacity: .5; }
+
+#cursor-line { stroke: #7f8ba5; stroke-width: 1; stroke-dasharray: 3 4; }
+#cursor-line.off { display: none; }
 
 .handle { cursor: grab; }
 .handle:active { cursor: grabbing; }
@@ -125,13 +132,34 @@ main {
   fill: var(--accent); stroke: #10141c; stroke-width: 2.5;
   transition: r .12s ease, fill .12s ease;
 }
+.handle text.tag {
+  fill: #7e8ba3; font-size: 10px; font-weight: 600;
+  pointer-events: none; transition: fill .12s ease;
+}
 .handle:hover circle.dot, .handle.dragging circle.dot { r: 8; fill: #86c4f2; }
+.handle:hover text.tag, .handle.dragging text.tag { fill: #c6d6e8; }
+
+.readout {
+  position: absolute; top: 10px; transform: translateX(-50%);
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 4px 10px; border-radius: 8px; pointer-events: none;
+  background: rgba(14,18,26,.9); border: 1px solid var(--line);
+  font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.readout b { font-weight: 600; }
+.readout span { color: var(--muted); }
+.readout[hidden] { display: none; }   /* the class sets display, so say it here too */
 
 /* below the plot, not on top of the axis labels */
-.curve-tip {
-  margin: 2px 0 0; padding: 0 4px 2px;
-  font-size: 11px; color: #5d667c; text-align: center;
+.curve-foot {
+  display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: center;
+  margin-top: 4px; padding: 0 4px 3px;
+  font-size: 11px; color: #5d667c;
 }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 0; border-radius: 2px; flex: none; }
+.swatch.sum  { border-top: 2.5px solid var(--accent); }
+.swatch.band { border-top: 1.5px solid #6f87a8; opacity: .7; }
 
 /* ───────────────────────────── presets ───────────────────────────── */
 .presets { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -146,9 +174,15 @@ main {
   background: rgba(90,169,230,.16); border-color: var(--accent); color: #a9d6f7;
 }
 .preset-note {
-  margin: 10px 0 18px; font-size: 12px; color: var(--muted);
+  margin: 10px 0 0; font-size: 12px; color: var(--muted);
   min-height: 2.4em; max-width: 72ch;
 }
+.split-note {
+  margin: 0 0 18px; padding: 9px 12px; border-radius: 9px;
+  font-size: 11.5px; line-height: 1.6; color: var(--muted); max-width: 78ch;
+  background: rgba(217,164,65,.07); border: 1px solid rgba(217,164,65,.22);
+}
+.split-note b { color: #e2c184; font-weight: 600; }
 
 /* ────────────────────────────── bands ───────────────────────────── */
 .bands { display: flex; flex-direction: column; gap: 10px; }

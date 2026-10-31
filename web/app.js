@@ -20,6 +20,7 @@ const state = {
   bands: [],                    // [{hz, gain}]
   savedBands: null,             // what the earbuds last reported
   bass: [0, 0, 0],
+  savedBass: null,              // what the earbuds last reported
   activePreset: null,
   busy: false,
 };
@@ -73,13 +74,7 @@ const dbFor = (y, h, pad) =>
   ((h / 2) - y) / ((h - 2 * pad) / 2) * DISPLAY_LIMIT;
 
 function responseAt(hz) {
-  let total = 0;
-  for (const { hz: centre, gain } of state.bands) {
-    if (!gain || !centre) continue;
-    const octaves = Math.log2(hz / centre);
-    total += gain * Math.exp(-0.5 * Math.pow(octaves / BELL_OCTAVES, 2));
-  }
-  return total;
+  return state.bands.reduce((total, band) => total + bellAt(band, hz), 0);
 }
 
 let rafPending = false;
@@ -89,6 +84,17 @@ function scheduleDraw() {
   requestAnimationFrame(() => { rafPending = false; drawCurve(); });
 }
 
+const NS = 'http://www.w3.org/2000/svg';
+const GRID_DB = [8, 6, 4, 2, 0, -2, -4, -6, -8];
+const GRID_HZ = [[50, '50'], [100, '100'], [200, '200'], [500, '500'],
+                 [1000, '1k'], [2000, '2k'], [5000, '5k'], [10000, '10k']];
+
+const bellAt = (band, hz) => (!band.gain || !band.hz) ? 0 :
+  band.gain * Math.exp(-0.5 * Math.pow(Math.log2(hz / band.hz) / BELL_OCTAVES, 2));
+
+const toPath = pts =>
+  pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+
 function drawCurve() {
   const svg = $('#curve');
   const w = svg.clientWidth || 900;
@@ -96,68 +102,119 @@ function drawCurve() {
   const pad = 16;
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
 
-  // grid
+  // grid: a line every 2 dB, labelled every 4
   const grid = $('#grid');
   grid.textContent = '';
-  const ns = 'http://www.w3.org/2000/svg';
-  for (const db of [8, 4, 0, -4, -8]) {
+  for (const db of GRID_DB) {
     const y = yFor(db, h, pad);
-    const line = document.createElementNS(ns, 'line');
+    const line = document.createElementNS(NS, 'line');
     line.setAttribute('x1', pad); line.setAttribute('x2', w - pad);
     line.setAttribute('y1', y);   line.setAttribute('y2', y);
     if (db === 0) line.setAttribute('class', 'zero');
-    else line.setAttribute('stroke-dasharray', '2 5');
+    else line.setAttribute('stroke-dasharray', db % 4 ? '1 7' : '2 5');
     grid.append(line);
-    const text = document.createElementNS(ns, 'text');
+    if (db % 4) continue;
+    const text = document.createElementNS(NS, 'text');
     text.setAttribute('x', w - pad - 2); text.setAttribute('y', y - 5);
     text.setAttribute('text-anchor', 'end');
     text.textContent = db > 0 ? `+${db}` : db;
     grid.append(text);
   }
-  for (const [hz, label] of [[100, '100'], [1000, '1k'], [10000, '10k']]) {
+  for (const [hz, label] of GRID_HZ) {
     const x = xFor(hz, w, pad);
-    const line = document.createElementNS(ns, 'line');
+    const line = document.createElementNS(NS, 'line');
     line.setAttribute('x1', x); line.setAttribute('x2', x);
-    line.setAttribute('y1', pad * 0.5); line.setAttribute('y2', h - pad * 0.5);
+    line.setAttribute('y1', pad * 0.5); line.setAttribute('y2', h - pad - 4);
     line.setAttribute('stroke-dasharray', '2 6');
     grid.append(line);
-    const text = document.createElementNS(ns, 'text');
-    text.setAttribute('x', x + 4); text.setAttribute('y', h - 5);
+    const text = document.createElementNS(NS, 'text');
+    text.setAttribute('x', x); text.setAttribute('y', h - 4);
+    text.setAttribute('text-anchor', 'middle');
     text.textContent = label;
     grid.append(text);
   }
 
-  // response line
-  const steps = 200, pts = [];
+  /* Sample once.  Each band is drawn on its own as well as summed, because a
+     dot sits at its band's gain while the bright line is every band added
+     together — without the faint bells the dots look unrelated to the line. */
+  const steps = 200;
+  const clamp = y => Math.max(2, Math.min(h - 2, y));
+  const sum = [], bells = state.bands.map(() => []);
   for (let i = 0; i <= steps; i++) {
     const ratio = i / steps;
     const hz = F_MIN * Math.pow(10, ratio * Math.log10(F_MAX / F_MIN));
     const x = pad + ratio * (w - 2 * pad);
-    pts.push([x, Math.max(2, Math.min(h - 2, yFor(responseAt(hz), h, pad)))]);
+    let total = 0;
+    state.bands.forEach((band, b) => {
+      const db = bellAt(band, hz);
+      total += db;
+      bells[b].push([x, clamp(yFor(db, h, pad))]);
+    });
+    sum.push([x, clamp(yFor(total, h, pad))]);
   }
-  const d = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+
+  const bellGroup = $('#bells');
+  bellGroup.textContent = '';
+  bells.forEach((pts, b) => {
+    if (!state.bands[b].gain) return;      // a flat band just traces the zero line
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', toPath(pts));
+    bellGroup.append(path);
+  });
+
+  const d = toPath(sum);
   $('#curve-line').setAttribute('d', d);
   $('#curve-fill').setAttribute('d',
-    `${d} L${pts.at(-1)[0].toFixed(1)} ${h / 2} L${pts[0][0].toFixed(1)} ${h / 2} Z`);
+    `${d} L${sum.at(-1)[0].toFixed(1)} ${yFor(0, h, pad)} L${sum[0][0].toFixed(1)} ${yFor(0, h, pad)} Z`);
 
   // draggable handles
   const handles = $('#handles');
   handles.textContent = '';
   state.bands.forEach((band, index) => {
-    const g = document.createElementNS(ns, 'g');
+    const g = document.createElementNS(NS, 'g');
     g.setAttribute('class', 'handle');
     g.dataset.index = index;
     const x = xFor(band.hz, w, pad);
     const y = Math.max(6, Math.min(h - 6, yFor(band.gain, h, pad)));
-    const hit = document.createElementNS(ns, 'circle');
+    const hit = document.createElementNS(NS, 'circle');
     hit.setAttribute('class', 'hit');
     hit.setAttribute('cx', x); hit.setAttribute('cy', y); hit.setAttribute('r', 18);
-    const dot = document.createElementNS(ns, 'circle');
+    const dot = document.createElementNS(NS, 'circle');
     dot.setAttribute('class', 'dot');
     dot.setAttribute('cx', x); dot.setAttribute('cy', y); dot.setAttribute('r', 6);
-    g.append(hit, dot);
+    const tag = document.createElementNS(NS, 'text');
+    tag.setAttribute('class', 'tag');
+    tag.setAttribute('x', x);
+    tag.setAttribute('y', y < 26 ? y + 18 : y - 13);   // flip below near the top
+    tag.setAttribute('text-anchor', 'middle');
+    tag.textContent = index + 1;
+    g.append(hit, dot, tag);
     handles.append(g);
   });
+}
+
+/* ───────────────────────── cursor readout ────────────────────────── */
+
+const fmtHz = hz => hz >= 1000
+  ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2).replace(/\.?0+$/, '')} kHz`
+  : `${Math.round(hz)} Hz`;
+const fmtDb = db => `${db > 0 ? '+' : db < 0 ? '−' : ''}${Math.abs(db).toFixed(1)} dB`;
+
+function setReadout(html, x) {
+  const svg = $('#curve');
+  const readout = $('#readout');
+  readout.innerHTML = html;
+  readout.hidden = false;
+  readout.style.left = `${Math.max(60, Math.min(svg.clientWidth - 60, x)) + 6}px`;
+  const line = $('#cursor-line');
+  line.setAttribute('x1', x); line.setAttribute('x2', x);
+  line.setAttribute('y1', 8); line.setAttribute('y2', svg.clientHeight - 20);
+  line.classList.remove('off');          // SVG ignores the hidden attribute
+}
+
+function hideReadout() {
+  $('#readout').hidden = true;
+  $('#cursor-line').classList.add('off');
 }
 
 /* dragging a handle changes both frequency and gain */
@@ -174,15 +231,25 @@ function drawCurve() {
   });
 
   svg.addEventListener('pointermove', event => {
-    if (dragging === null) return;
     const rect = svg.getBoundingClientRect();
     const pad = 16;
+    const x = event.clientX - rect.left;
+
+    if (dragging === null) {
+      // hovering: show what the summed curve does at this frequency
+      const hz = freqFor(x, rect.width, pad);
+      setReadout(`<b>${fmtHz(hz)}</b><span>${fmtDb(responseAt(hz))}</span>`, x);
+      return;
+    }
+
     const band = state.bands[dragging];
-    band.hz = Math.max(F_MIN, Math.min(F_MAX,
-      freqFor(event.clientX - rect.left, rect.width, pad)));
+    band.hz = Math.max(F_MIN, Math.min(F_MAX, freqFor(x, rect.width, pad)));
     const db = dbFor(event.clientY - rect.top, rect.height, pad);
     band.gain = Math.max(state.limits.gainMin,
       Math.min(state.limits.gainMax, Math.round(db)));
+    setReadout(
+      `<b>Band ${dragging + 1} · ${fmtHz(band.hz)}</b><span>${fmtDb(band.gain)}</span>`,
+      xFor(band.hz, rect.width, pad));
     syncBandInputs();
     clearPresetSelection();
     markDirty();
@@ -197,6 +264,7 @@ function drawCurve() {
   };
   svg.addEventListener('pointerup', release);
   svg.addEventListener('pointercancel', release);
+  svg.addEventListener('pointerleave', () => { if (dragging === null) hideReadout(); });
 })();
 
 window.addEventListener('resize', scheduleDraw);
@@ -312,8 +380,17 @@ function buildBass() {
     state.bass[index] = Number(event.target.value);
     paintRange(event.target);
     syncBassLabels();
+    markBassDirty();
   };
   syncBassLabels();
+}
+
+/* The equaliser and the bass engine are two separate writes, so each tracks
+   its own unsaved state. */
+function markBassDirty() {
+  const saved = state.savedBass;
+  const same = !saved || saved.every((value, i) => value === state.bass[i]);
+  $('#bass-dirty').hidden = same || !state.connected;
 }
 
 function syncBassLabels() {
@@ -355,6 +432,7 @@ function applyPreset(preset) {
   buildBands();
   syncBassLabels();
   markDirty();
+  markBassDirty();
   scheduleDraw();
 }
 
@@ -492,10 +570,12 @@ function adoptDeviceEq() {
     bass.forEach(entry => {
       if (entry.band >= 1 && entry.band <= 3) state.bass[entry.band - 1] = entry.value;
     });
+    state.savedBass = [...state.bass];
   }
   buildBands();
   syncBassLabels();
   markDirty();
+  markBassDirty();
   scheduleDraw();
 }
 
@@ -524,6 +604,8 @@ async function refresh() {
   } else {
     // still draw the rows and curve so the page is never half-empty
     buildBands();
+    markDirty();
+    markBassDirty();
     scheduleDraw();
   }
   buildFeatures();
@@ -542,6 +624,7 @@ $('#connect-btn').onclick = async () => {
       state.connected = false;
       state.device = null;
       state.savedBands = null;
+      state.savedBass = null;
       toast('Disconnected');
     } else {
       const result = await api('/api/connect', {});
@@ -592,12 +675,18 @@ $('#eq-read').onclick = async () => {
   }
 };
 
+$('#bass-enabled').onchange = () => { $('#bass-dirty').hidden = !state.connected; };
+
 $('#bass-apply').onclick = async () => {
   setBusy(true);
   try {
     const result = await api('/api/bass', {
       values: state.bass, enabled: $('#bass-enabled').checked,
     });
+    if (result.ok) {
+      state.savedBass = [...state.bass];
+      markBassDirty();
+    }
     toast(result.ok ? 'Bass engine updated' : result.error, result.ok ? 'ok' : 'bad');
   } catch (error) {
     toast(error.message, 'bad');

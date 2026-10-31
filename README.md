@@ -14,10 +14,12 @@ lives, and nothing between 1 kHz and 4 kHz, where vocal presence lives.
 
 ## What it does
 
-- **Equaliser** with six bands you can place anywhere from 20 Hz to 20 kHz,
-  and a live response curve that redraws as you move them
+- **Equaliser** with six bands you can place anywhere from 20 Hz to 20 kHz, and
+  a live response curve that draws each band on its own as well as the sum of
+  all six, so a handle's position explains itself
 - **Dynamic bass engine** — a second processor with its own range, which the
-  official app barely exposes
+  official app barely exposes. It is a separate write: applying the equaliser
+  does not send it, and the interface tracks unsaved changes to each one apart
 - **Feature toggles** — Hi-Res (LHDC), spatial audio, game mode, wind noise
   reduction and the rest. Switches your firmware does not report are shown
   disabled rather than hidden, so you can see what it genuinely lacks

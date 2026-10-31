@@ -33,12 +33,13 @@
       <div>
         <h2>Equaliser</h2>
         <p class="hint">Six bands you can place at any frequency. The official
-          app is locked to six fixed ones.</p>
+          app is locked to six fixed ones. This button writes the six bands and
+          nothing else — the bass engine below has its own.</p>
       </div>
       <div class="actions">
         <span class="pill warn" id="eq-dirty" hidden>Not saved yet</span>
         <button class="btn ghost" id="eq-read" data-testid="eq-read">Read from earbuds</button>
-        <button class="btn primary" id="eq-apply" data-testid="eq-apply">Apply</button>
+        <button class="btn primary" id="eq-apply" data-testid="eq-apply">Apply equaliser</button>
       </div>
     </div>
 
@@ -52,16 +53,27 @@
           </linearGradient>
         </defs>
         <g id="grid"></g>
+        <line id="cursor-line" class="off" x1="0" x2="0" y1="0" y2="0"></line>
+        <g id="bells"></g>
         <path id="curve-fill" fill="url(#fill)"></path>
         <path id="curve-line" fill="none" stroke="#5aa9e6" stroke-width="2.5"
               stroke-linecap="round"></path>
         <g id="handles"></g>
       </svg>
-      <p class="curve-tip">Drag a point: up and down for gain, left and right for frequency.</p>
+      <div class="readout" id="readout" data-testid="readout" hidden></div>
+      <div class="curve-foot">
+        <span class="key"><i class="swatch sum"></i>what you hear — all six added up</span>
+        <span class="key"><i class="swatch band"></i>one band alone — each numbered dot sits on its own</span>
+        <span class="key">Drag a dot: up and down for gain, sideways for frequency. Hover to read a value.</span>
+      </div>
     </div>
 
     <div class="presets" id="presets" data-testid="presets"></div>
     <p class="preset-note" id="preset-note"></p>
+    <p class="split-note">A preset fills in both sections, but they are sent to
+      the earbuds separately: <b>Apply equaliser</b> writes only the six bands,
+      <b>Apply bass</b> only the three bass values. Each shows its own
+      “Not saved yet”, so apply both to hear a preset in full.</p>
 
     <div class="bands" id="bands"></div>
   </section>
@@ -72,14 +84,16 @@
       <div>
         <h2>Bass engine</h2>
         <p class="hint">A second processor, separate from the equaliser. Use it
-          for weight so the equaliser stays free for tone.</p>
+          for weight so the equaliser stays free for tone. It does not appear on
+          the curve above, and the equaliser's button does not write it.</p>
       </div>
       <div class="actions">
+        <span class="pill warn" id="bass-dirty" hidden>Not saved yet</span>
         <label class="switch">
           <input type="checkbox" id="bass-enabled" data-testid="bass-enabled" checked>
           <span class="track"></span>
         </label>
-        <button class="btn primary" id="bass-apply" data-testid="bass-apply">Apply</button>
+        <button class="btn primary" id="bass-apply" data-testid="bass-apply">Apply bass</button>
       </div>
     </div>
     <div class="bands" id="bass-bands"></div>
