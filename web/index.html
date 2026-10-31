@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>realme Buds Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%235aa9e6'/><path d='M6 20 Q11 9 16 16 T26 13' stroke='%2307121c' stroke-width='3' fill='none' stroke-linecap='round'/></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>realme Buds Control</h1>
+  </div>
+  <div class="device" id="device-area">
+    <span class="dot" id="status-dot" data-state="off"></span>
+    <div class="device-text">
+      <strong id="device-name">Not connected</strong>
+      <span class="sub" id="device-sub">Looking for earbuds&hellip;</span>
+    </div>
+    <div class="battery" id="battery" hidden></div>
+    <button class="btn ghost" id="connect-btn" data-testid="connect">Connect</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ─────────────────────────── equaliser ─────────────────────────── -->
+  <section class="card" id="eq-card">
+    <div class="card-head">
+      <div>
+        <h2>Equaliser</h2>
+        <p class="hint">Six bands you can place at any frequency. The official
+          app is locked to six fixed ones.</p>
+      </div>
+      <div class="actions">
+        <span class="pill warn" id="eq-dirty" hidden>Not saved yet</span>
+        <button class="btn ghost" id="eq-read" data-testid="eq-read">Read from earbuds</button>
+        <button class="btn primary" id="eq-apply" data-testid="eq-apply">Apply</button>
+      </div>
+    </div>
+
+    <div class="curve-wrap">
+      <svg id="curve" viewBox="0 0 900 232"
+           data-testid="curve" role="img" aria-label="Equaliser response curve">
+        <defs>
+          <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#4a9eda" stop-opacity=".34"/>
+            <stop offset="100%" stop-color="#4a9eda" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <g id="grid"></g>
+        <path id="curve-fill" fill="url(#fill)"></path>
+        <path id="curve-line" fill="none" stroke="#5aa9e6" stroke-width="2.5"
+              stroke-linecap="round"></path>
+        <g id="handles"></g>
+      </svg>
+      <p class="curve-tip">Drag a point: up and down for gain, left and right for frequency.</p>
+    </div>
+
+    <div class="presets" id="presets" data-testid="presets"></div>
+    <p class="preset-note" id="preset-note"></p>
+
+    <div class="bands" id="bands"></div>
+  </section>
+
+  <!-- ─────────────────────────── bass engine ───────────────────────── -->
+  <section class="card" id="bass-card">
+    <div class="card-head">
+      <div>
+        <h2>Bass engine</h2>
+        <p class="hint">A second processor, separate from the equaliser. Use it
+          for weight so the equaliser stays free for tone.</p>
+      </div>
+      <div class="actions">
+        <label class="switch">
+          <input type="checkbox" id="bass-enabled" data-testid="bass-enabled" checked>
+          <span class="track"></span>
+        </label>
+        <button class="btn primary" id="bass-apply" data-testid="bass-apply">Apply</button>
+      </div>
+    </div>
+    <div class="bands" id="bass-bands"></div>
+  </section>
+
+  <!-- ───────────────────────────── features ────────────────────────── -->
+  <section class="card" id="features-card">
+    <div class="card-head">
+      <div>
+        <h2>Features</h2>
+        <p class="hint">Greyed-out switches are ones your firmware never
+          reported, which means it does not have them.</p>
+      </div>
+    </div>
+    <div class="feature-grid" id="features" data-testid="features"></div>
+  </section>
+
+  <!-- ─────────────────────────────── device ────────────────────────── -->
+  <section class="card">
+    <details id="device-details">
+      <summary><h2>Device information</h2></summary>
+      <pre id="device-info" data-testid="device-info">Not connected.</pre>
+    </details>
+  </section>
+
+</main>
+
+<div class="toasts" id="toasts" data-testid="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

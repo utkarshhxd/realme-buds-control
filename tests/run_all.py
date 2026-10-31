@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 OFFLINE = ["test_protocol", "test_curve"]
-HARDWARE = ["test_controller", "test_gui_flow"]
+# test_server runs either way: routing, validation and static files need no
+# earbuds, and the device parts skip themselves.
+HARDWARE = ["test_server", "test_controller"]
 
 
 def main() -> int:

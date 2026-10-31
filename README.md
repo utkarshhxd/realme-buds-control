@@ -8,6 +8,8 @@ whatever centre frequencies they are given. That matters because the stock
 layout has two awkward gaps — nothing between 250 Hz and 1 kHz, where boxiness
 lives, and nothing between 1 kHz and 4 kHz, where vocal presence lives.
 
+![the interface](docs/screenshot.png)
+
 ![band comparison](docs/bands.svg)
 
 ## What it does
@@ -42,8 +44,11 @@ machine — if they have handed the link back to a phone, reconnect them here.
 ## Use
 
 ```bash
-python gui.py              # desktop interface
+python app.py              # opens the interface in your browser
 ```
+
+It serves on `127.0.0.1` only, connects to the first earbuds it finds, and
+reads their current settings so what you see is what is actually on them.
 
 Or from the command line:
 
@@ -136,9 +141,11 @@ Action 1 adds, 2 modifies, 3 deletes. Writing a profile also makes it active.
 buds/protocol.py    framing, command table, encode and decode
 buds/device.py      the connection and the high-level operations
 buds/controller.py  one worker thread that serialises every operation
+buds/server.py      local HTTP server and JSON API
 buds/curve.py       response maths for the equaliser display
 buds/presets.py     the tunings
-gui.py  cli.py      two front ends over the same library
+web/                the interface: one page, no build step, no dependencies
+app.py  cli.py      two front ends over the same library
 ```
 
 The transport is a single request/response link with a shared receive buffer,
@@ -156,8 +163,24 @@ python tests/run_all.py --offline  # only those not needing earbuds
 
 The protocol fixtures are real responses captured from a Buds Air8, so the
 parsers are checked against hardware rather than against assumptions about it.
-The controller and interface tests drive the real window against real earbuds
-and skip themselves when none are connected.
+Routing, validation and static files need no earbuds; the parts that talk to a
+device skip themselves when none is connected.
+
+| module | covers |
+|---|---|
+| `test_protocol` | framing and every encoder and parser |
+| `test_curve` | response and axis maths |
+| `test_controller` | ordering, isolation, failure handling |
+| `test_server` | HTTP routing, validation, and round trips to real earbuds |
+
+## Notes on the serial port
+
+Only one process can hold the port at a time, so the web interface and the CLI
+cannot both be connected. Stop one before using the other.
+
+The port exists only while the earbuds are connected to this computer. They do
+multipoint, so they will often hand the link back to a phone; reconnect them
+here and press Connect.
 
 ## Compatibility
 

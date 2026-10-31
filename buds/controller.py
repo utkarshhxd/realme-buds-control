@@ -49,6 +49,10 @@ class _Job:
     callback: Callback | None = None
     # Connecting is the one job that must run while nothing is connected yet.
     needs_connection: bool = True
+    # Set for blocking callers: the result goes into ``slot`` and ``done`` is
+    # signalled, instead of being queued for a poll() that may never happen.
+    done: threading.Event | None = None
+    slot: dict | None = None
 
 
 _STOP = _Job("stop", lambda _b: None)
@@ -111,6 +115,16 @@ class Controller:
         self._connected.clear()
 
     # ------------------------------------------------------------- worker --
+    def _deliver(self, job: _Job, result: Result) -> None:
+        if job.done is not None:
+            # Blocking caller: hand the result straight back and release it.
+            if job.slot is not None:
+                job.slot["result"] = result
+            self._track(-1)
+            job.done.set()
+        else:
+            self._results.put(result)
+
     def _loop(self) -> None:
         while True:
             job = self._jobs.get()
@@ -121,17 +135,17 @@ class Controller:
                 if job.needs_connection and (buds is None or not buds.connected):
                     raise NotConnected("earbuds are not connected")
                 value = job.fn(buds)
-                self._results.put(Result(job.task, value, callback=job.callback))
+                self._deliver(job, Result(job.task, value, callback=job.callback))
             except NotConnected as exc:
                 # The link is genuinely gone: drop it and say so.
                 self._drop()
-                self._results.put(Result(job.task, error=exc, disconnected=True,
-                                         callback=job.callback))
+                self._deliver(job, Result(job.task, error=exc, disconnected=True,
+                                          callback=job.callback))
             except Exception as exc:
                 # One operation failed but the connection may be fine, so keep
                 # it and report only this failure.
-                self._results.put(Result(job.task, error=exc,
-                                         callback=job.callback))
+                self._deliver(job, Result(job.task, error=exc,
+                                          callback=job.callback))
             finally:
                 self._jobs.task_done()
 
@@ -143,8 +157,8 @@ class Controller:
         self._track(+1)
         self._jobs.put(_Job(task, fn, callback))
 
-    def connect(self, port: Port, callback: Callback | None = None) -> None:
-        """Open a connection, replacing any existing one."""
+    def _connect_fn(self, port: Port) -> Callable[[Buds | None], str]:
+        """Build the connect operation, shared by the queued and blocking paths."""
 
         def do_connect(_unused: Buds | None) -> str:
             self._drop()
@@ -165,9 +179,13 @@ class Controller:
             self._connected.set()
             return firmware
 
+        return do_connect
+
+    def connect(self, port: Port, callback: Callback | None = None) -> None:
+        """Open a connection, replacing any existing one."""
         self.start()
         self._track(+1)
-        self._jobs.put(_Job("connect", do_connect, callback,
+        self._jobs.put(_Job("connect", self._connect_fn(port), callback,
                             needs_connection=False))
 
     def disconnect(self, callback: Callback | None = None) -> None:
@@ -178,6 +196,34 @@ class Controller:
         self._track(+1)
         self._jobs.put(_Job("disconnect", do_disconnect, callback,
                             needs_connection=False))
+
+    def execute(self, task: str, fn: Callable[[Buds], Any],
+                timeout: float = 25.0, needs_connection: bool = True) -> Result:
+        """Queue an operation and wait for it.
+
+        For callers without an event loop to drive :meth:`poll`, such as an
+        HTTP handler.  The work still runs on the one worker thread, so it
+        stays ordered against everything else.
+        """
+        self.start()
+        done = threading.Event()
+        slot: dict = {}
+        self._track(+1)
+        self._jobs.put(_Job(task, fn, needs_connection=needs_connection,
+                            done=done, slot=slot))
+        if not done.wait(timeout):
+            return Result(task, error=TimeoutError(
+                f"{task} did not finish within {timeout:g}s"))
+        return slot.get("result", Result(task, error=RuntimeError("no result")))
+
+    def connect_sync(self, port: Port, timeout: float = 25.0) -> Result:
+        """Blocking connect, for the same callers as :meth:`execute`."""
+        return self.execute("connect", self._connect_fn(port), timeout,
+                            needs_connection=False)
+
+    def disconnect_sync(self, timeout: float = 10.0) -> Result:
+        return self.execute("disconnect", lambda _b: self._drop(), timeout,
+                            needs_connection=False)
 
     def poll(self) -> list[Result]:
         """Deliver finished results. Call this from the UI thread.
